@@ -13,4 +13,6 @@ public interface ApiKeyRepository extends JpaRepository<ApiKey, Long> {
     List<ApiKey> findByUserEmail(String email);
 
     long countByActive(boolean active);
+
+    void deleteById(Long id);
 }

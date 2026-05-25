@@ -57,6 +57,12 @@ public class ApiKeyService {
 
         return apiKeyRepository.save(apiKey);
     }
+    public void deleteKey(Long id) {
+    ApiKey apiKey = apiKeyRepository.findById(id)
+            .orElseThrow(() -> new RuntimeException("API key not found"));
+
+    apiKeyRepository.delete(apiKey);
+}
 
     // DASHBOARD METHODS
 

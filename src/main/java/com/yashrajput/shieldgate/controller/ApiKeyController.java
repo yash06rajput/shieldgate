@@ -43,6 +43,11 @@ public class ApiKeyController {
     public ApiKeyResponse toggleKey(@PathVariable Long id) {
         return mapToResponse(apiKeyService.toggleKey(id));
     }
+    @DeleteMapping("/{id}")
+public Map<String, String> deleteKey(@PathVariable Long id) {
+    apiKeyService.deleteKey(id);
+    return Map.of("message", "API key deleted successfully");
+}
 
     // DASHBOARD ENDPOINTS
 

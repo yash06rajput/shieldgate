@@ -21,15 +21,27 @@ public class ApiKeyFilter extends OncePerRequestFilter {
 
     private static final Logger logger = LoggerFactory.getLogger(ApiKeyFilter.class);
 
+    private static final int MAX_FAILED_ATTEMPTS = 3;
+    private static final int LOCK_WINDOW_MINUTES = 15;
+
     private final ApiKeyRepository apiKeyRepository;
     private final SecurityEventService securityEventService;
+    private final IpRateLimiter ipRateLimiter;
+    private final BurstDetector burstDetector;
+    private final RedisRateLimiter redisRateLimiter;
 
     public ApiKeyFilter(
             ApiKeyRepository apiKeyRepository,
-            SecurityEventService securityEventService
+            SecurityEventService securityEventService,
+            IpRateLimiter ipRateLimiter,
+            BurstDetector burstDetector,
+            RedisRateLimiter redisRateLimiter
     ) {
         this.apiKeyRepository = apiKeyRepository;
         this.securityEventService = securityEventService;
+        this.ipRateLimiter = ipRateLimiter;
+        this.burstDetector = burstDetector;
+        this.redisRateLimiter = redisRateLimiter;
     }
 
     @Override
@@ -42,17 +54,34 @@ public class ApiKeyFilter extends OncePerRequestFilter {
         String path = request.getRequestURI();
         String ip = getClientIp(request);
 
-        // Protect only vendor APIs
         if (!path.startsWith("/api/vendor")) {
             filterChain.doFilter(request, response);
             return;
         }
 
+        // CLEAN LOCALHOST DISPLAY
+        if ("0:0:0:0:0:0:0:1".equals(ip) || "::1".equals(ip)) {
+            ip = "LOCALHOST";
+        }
+
+        // BLOCKED IP CHECK
+        if (ipRateLimiter.isBlocked(ip)) {
+            securityEventService.logEvent(
+                    "IP_BLOCKED",
+                    "CRITICAL",
+                    ip,
+                    path,
+                    "Blocked IP attempted access"
+            );
+
+            response.sendError(423, "Too many failed attempts. IP temporarily blocked.");
+            return;
+        }
+
         String apiKeyValue = request.getHeader("x-api-key");
 
-        // Missing API Key
+        // MISSING KEY
         if (apiKeyValue == null || apiKeyValue.isBlank()) {
-
             securityEventService.logEvent(
                     "MISSING_API_KEY",
                     "HIGH",
@@ -61,12 +90,7 @@ public class ApiKeyFilter extends OncePerRequestFilter {
                     "Request without API key"
             );
 
-            logger.warn(
-                    "SECURITY_EVENT=missing_api_key IP={} PATH={}",
-                    ip,
-                    path
-            );
-
+            ipRateLimiter.recordFailure(ip);
             response.sendError(401, "Missing API Key");
             return;
         }
@@ -75,9 +99,8 @@ public class ApiKeyFilter extends OncePerRequestFilter {
                 .findByKeyValue(apiKeyValue.trim())
                 .orElse(null);
 
-        // Invalid API Key
+        // INVALID KEY
         if (apiKey == null) {
-
             securityEventService.logEvent(
                     "INVALID_API_KEY",
                     "CRITICAL",
@@ -93,13 +116,32 @@ public class ApiKeyFilter extends OncePerRequestFilter {
                     maskKey(apiKeyValue)
             );
 
+            ipRateLimiter.recordFailure(ip);
             response.sendError(401, "Invalid API Key");
             return;
         }
 
-        // Disabled API Key
-        if (!apiKey.isActive()) {
+        // LOCKED KEY
+        if (apiKey.getFailedAttempts() >= MAX_FAILED_ATTEMPTS &&
+                apiKey.getLastFailedAttempt() != null &&
+                apiKey.getLastFailedAttempt()
+                        .plusMinutes(LOCK_WINDOW_MINUTES)
+                        .isAfter(LocalDateTime.now())) {
 
+            securityEventService.logEvent(
+                    "API_KEY_LOCKED",
+                    "CRITICAL",
+                    ip,
+                    path,
+                    "Locked API key attempted"
+            );
+
+            response.sendError(423, "API key temporarily locked");
+            return;
+        }
+
+        // DISABLED KEY
+        if (!apiKey.isActive()) {
             securityEventService.logEvent(
                     "DISABLED_KEY_USED",
                     "CRITICAL",
@@ -108,18 +150,11 @@ public class ApiKeyFilter extends OncePerRequestFilter {
                     "Disabled API key attempted"
             );
 
-            logger.warn(
-                    "SECURITY_EVENT=disabled_key_used IP={} PATH={} KEY_NAME={}",
-                    ip,
-                    path,
-                    apiKey.getName()
-            );
-
             response.sendError(403, "API Key Disabled");
             return;
         }
 
-        // Reset daily quota if new day
+        // DAILY RESET
         if (apiKey.getQuotaResetDate() == null ||
                 !LocalDate.now().equals(apiKey.getQuotaResetDate())) {
 
@@ -127,30 +162,70 @@ public class ApiKeyFilter extends OncePerRequestFilter {
             apiKey.setQuotaResetDate(LocalDate.now());
         }
 
-        // Quota exceeded
+        // DAILY QUOTA CHECK
         if (apiKey.getRequestsUsed() >= apiKey.getDailyQuota()) {
-
             securityEventService.logEvent(
-                    "QUOTA_EXCEEDED",
-                    "MEDIUM",
+                    "QUOTA_EXHAUSTED",
+                    "HIGH",
                     ip,
                     path,
-                    "API quota exceeded"
+                    "Daily quota exhausted"
             );
 
-            logger.warn(
-                    "SECURITY_EVENT=quota_exceeded IP={} KEY_NAME={} USED={}/{}",
-                    ip,
-                    apiKey.getName(),
-                    apiKey.getRequestsUsed(),
-                    apiKey.getDailyQuota()
-            );
-
-            response.sendError(429, "Daily quota exceeded");
+            response.sendError(429, "Daily quota exhausted");
             return;
         }
 
-        // Usage analytics
+        // REDIS SHORT WINDOW RATE LIMIT
+        boolean allowed;
+
+        try {
+            allowed = redisRateLimiter.allowRequest(
+                    apiKeyValue,
+                    5,   // max requests
+                    10   // per 10 seconds
+            );
+        } catch (Exception e) {
+            logger.warn("Redis unavailable, falling back to DB quota only");
+            allowed = true;
+        }
+
+        if (!allowed) {
+            securityEventService.logEvent(
+                    "RATE_LIMIT_EXCEEDED",
+                    "HIGH",
+                    ip,
+                    path,
+                    "Redis short-window rate limit exceeded"
+            );
+
+            response.sendError(429, "Rate limit exceeded");
+            return;
+        }
+
+        // BURST DETECTION
+        if (burstDetector.isSuspicious(apiKey.getKeyValue())) {
+            securityEventService.logEvent(
+                    "SUSPICIOUS_BURST",
+                    "CRITICAL",
+                    ip,
+                    path,
+                    "Abnormally high request burst detected"
+            );
+
+            logger.warn(
+                    "SECURITY_EVENT=burst_attack IP={} KEY_NAME={}",
+                    ip,
+                    apiKey.getName()
+            );
+        }
+
+        // SUCCESS PATH
+        ipRateLimiter.clearFailures(ip);
+
+        apiKey.setFailedAttempts(0);
+        apiKey.setLastFailedAttempt(null);
+
         apiKey.setRequestsUsed(apiKey.getRequestsUsed() + 1);
         apiKey.setLastUsedAt(LocalDateTime.now());
 
