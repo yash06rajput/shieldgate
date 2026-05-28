@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   mysql:
     image: mysql:8.0
@@ -9,7 +7,7 @@ services:
       MYSQL_ROOT_PASSWORD: root
       MYSQL_DATABASE: shieldgate
     ports:
-      - "3306:3306"
+      - "3307:3306"
     volumes:
       - mysql_data:/var/lib/mysql
 
@@ -23,18 +21,19 @@ services:
   backend:
     build: .
     container_name: shieldgate-backend
-    restart: always
     depends_on:
       - mysql
       - redis
     ports:
       - "8080:8080"
-    environment:
-      SPRING_DATASOURCE_URL: jdbc:mysql://mysql:3306/shieldgate
-      SPRING_DATASOURCE_USERNAME: root
-      SPRING_DATASOURCE_PASSWORD: root
-      SPRING_DATA_REDIS_HOST: redis
-      SPRING_DATA_REDIS_PORT: 6379
+
+  frontend:
+    build: ./shieldgate-frontend
+    container_name: shieldgate-frontend
+    depends_on:
+      - backend
+    ports:
+      - "5173:80"
 
 volumes:
   mysql_data:
