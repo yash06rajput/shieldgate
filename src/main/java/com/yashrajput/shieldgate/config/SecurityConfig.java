@@ -53,10 +53,14 @@ public class SecurityConfig {
     public CorsConfigurationSource corsConfigurationSource() {
         CorsConfiguration config = new CorsConfiguration();
 
-        config.setAllowedOrigins(List.of("http://localhost:5173"));
-        config.setAllowedMethods(List.of("*"));
-        config.setAllowedHeaders(List.of("*"));
-        config.setAllowCredentials(true);
+        config.setAllowedOrigins(List.of(
+    "http://localhost:5173",
+    "https://sweet-playfulness-production-7a37.up.railway.app"
+));
+
+config.setAllowedMethods(List.of("*"));
+config.setAllowedHeaders(List.of("*"));
+config.setAllowCredentials(true);
 
         UrlBasedCorsConfigurationSource source =
                 new UrlBasedCorsConfigurationSource();
