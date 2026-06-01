@@ -1,6 +1,6 @@
 import { useState } from "react";
 
-const API_URL = "https://shieldgate-production.up.railway.app/api/";
+const API_URL = "https://shieldgate-production.up.railway.app/api/vendor/test";
 
 export default function ApiPlayground() {
   const [apiKey, setApiKey] = useState("");
